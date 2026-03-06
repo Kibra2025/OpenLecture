@@ -1,0 +1,2 @@
+[console_scripts]
+openlecture = openlecture.cli:app

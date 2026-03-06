@@ -1,0 +1,12 @@
+[project]
+name = "openlecture"
+version = "0.1.0"
+description = "Open-source AI tool for transcription"
+authors = [{name="Kibra2025"}]
+dependencies = [
+    "faster-whisper",
+    "typer"
+]
+
+[project.scripts]
+openlecture = "openlecture.cli:app"
