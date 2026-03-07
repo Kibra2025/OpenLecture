@@ -10,6 +10,11 @@ app = typer.Typer()
 def transcribe(
     audio_file: Path,
     output: str = "transcript.txt",
+    progress: bool = typer.Option(
+        True,
+        "--progress/--no-progress",
+        help="Show transcription progress in the terminal.",
+    ),
 ):
     """
     Transcribe an audio file using Whisper.
@@ -18,7 +23,7 @@ def transcribe(
     typer.echo("Starting OpenLecture...")
 
     try:
-        transcript = transcribe_audio(str(audio_file))
+        transcript = transcribe_audio(str(audio_file), show_progress=progress)
 
         with open(output, "w", encoding="utf-8") as f:
             f.write(transcript)
