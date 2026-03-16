@@ -5,7 +5,9 @@ description = "Open-source AI tool for transcription"
 authors = [{name="Kibra2025"}]
 dependencies = [
     "faster-whisper",
-    "typer"
+    "typer",
+    "pydub",
+    "av"
 ]
 
 [project.scripts]
