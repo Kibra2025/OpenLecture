@@ -1,8 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "openlecture"
 version = "0.1.0"
 description = "Open-source AI tool for transcription"
 authors = [{name="Kibra2025"}]
+requires-python = ">=3.10"
 dependencies = [
     "faster-whisper",
     "typer",
@@ -10,5 +15,19 @@ dependencies = [
     "av"
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+
 [project.scripts]
-openlecture = "openlecture.cli:app"
+openlecture = "openlecture.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+norecursedirs = [
+    ".pytest_cache",
+    "_tmp",
+    "pytest-cache-files-*",
+]

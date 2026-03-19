@@ -1,5 +1,2 @@
-faster-whisper
-ffmpeg-python
-typer
-pydub
-av
+# Install the package and its runtime dependencies from pyproject.toml.
+-e .

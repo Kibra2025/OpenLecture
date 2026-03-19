@@ -1,6 +1,8 @@
-import typer
-import sys
+"""CLI entrypoint for OpenLecture."""
+
 from pathlib import Path
+
+import typer
 
 from .output_formatter import transcript_to_markdown
 from .transcribe import transcribe_audio
@@ -27,11 +29,8 @@ def transcribe(
         min=1,
         help="Split audio into chunks of this length before transcription.",
     ),
-):
-    """
-    Transcribe an audio file using Whisper.
-    """
-
+) -> None:
+    """Transcribe an audio file using Whisper."""
     typer.echo("Starting OpenLecture...")
 
     try:
@@ -51,11 +50,7 @@ def transcribe(
 
 
 def main() -> None:
-    # Typer promotes a single command to the app root, so accept the
-    # explicit subcommand form users naturally try as well.
-    if len(sys.argv) > 1 and sys.argv[1] == "transcribe":
-        sys.argv.pop(1)
-
+    """Run the OpenLecture CLI."""
     app()
 
 
