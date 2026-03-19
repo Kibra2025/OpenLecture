@@ -1,11 +1,11 @@
-"""Utilities for splitting and exporting audio chunks."""
+﻿"""Utilities for inspecting, splitting, and exporting audio."""
 
 from __future__ import annotations
 
 import os
 import shutil
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,6 +24,8 @@ WINDOWS_WINGET_FFMPEG_PACKAGES = (
     "Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe",
     "Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe",
 )
+
+DEFAULT_OVERLAP_MS = 2_000
 
 
 @lru_cache(maxsize=1)
@@ -107,6 +109,34 @@ def _get_audio_segment_class():
 def _infer_audio_format(audio_file: Path) -> str | None:
     """Infer the decoder format from the file extension when possible."""
     return SUPPORTED_FORMATS.get(audio_file.suffix.lower())
+
+
+def _validate_audio_path(audio_path: str) -> Path:
+    """Validate the input path and return it as a ``Path`` object."""
+    if not audio_path or not audio_path.strip():
+        raise ValueError("audio_path must not be empty.")
+
+    audio_file = Path(audio_path).expanduser()
+
+    if not audio_file.exists():
+        raise FileNotFoundError(f"Audio file not found: {audio_file}")
+
+    if not audio_file.is_file():
+        raise ValueError(f"Audio path is not a file: {audio_file}")
+
+    return audio_file
+
+
+def _validate_chunking_options(chunk_length_ms: int, overlap_ms: int) -> None:
+    """Validate chunk size and overlap settings."""
+    if chunk_length_ms <= 0:
+        raise ValueError("chunk_length_ms must be greater than 0.")
+
+    if overlap_ms < 0:
+        raise ValueError("overlap_ms must be greater than or equal to 0.")
+
+    if overlap_ms >= chunk_length_ms:
+        raise ValueError("overlap_ms must be smaller than chunk_length_ms.")
 
 
 def _load_with_pydub(
@@ -198,57 +228,100 @@ def _load_with_pyav(audio_file: Path, audio_segment_class) -> "AudioSegment":
         raise RuntimeError("Failed to decode audio file") from exc
 
 
-def split_audio(audio_path: str, chunk_length_ms: int = 60000) -> list["AudioSegment"]:
+def _load_audio_segment(audio_file: Path) -> "AudioSegment":
+    """Load an audio file into a single ``AudioSegment`` instance."""
+    AudioSegment = _get_audio_segment_class()
+    audio_format = _infer_audio_format(audio_file)
+
+    try:
+        return _load_with_pydub(audio_file, audio_format, AudioSegment)
+    except RuntimeError:
+        try:
+            return _load_with_pyav(audio_file, AudioSegment)
+        except RuntimeError as fallback_exc:
+            raise RuntimeError("Failed to decode audio file") from fallback_exc
+
+
+def get_audio_duration_seconds(audio_path: str) -> float:
+    """Return the audio duration in seconds."""
+    audio_file = _validate_audio_path(audio_path)
+
+    try:
+        import av
+
+        with av.open(str(audio_file)) as container:
+            if container.duration is not None:
+                return float(container.duration / av.time_base)
+
+            audio_stream = next(
+                (stream for stream in container.streams if stream.type == "audio"),
+                None,
+            )
+            if (
+                audio_stream is not None
+                and audio_stream.duration is not None
+                and audio_stream.time_base is not None
+            ):
+                return float(audio_stream.duration * audio_stream.time_base)
+    except Exception:
+        pass
+
+    audio = _load_audio_segment(audio_file)
+    return len(audio) / 1000
+
+
+def iter_audio_chunks(
+    audio_path: str,
+    chunk_length_ms: int = 60000,
+    overlap_ms: int = DEFAULT_OVERLAP_MS,
+) -> Iterator["AudioSegment"]:
+    """Yield one audio chunk at a time from the input file.
+
+    Each chunk overlaps the next one by ``overlap_ms`` to reduce word cuts at
+    chunk boundaries.
+    """
+    _validate_chunking_options(chunk_length_ms, overlap_ms)
+
+    audio_file = _validate_audio_path(audio_path)
+    audio = _load_audio_segment(audio_file)
+    step_ms = chunk_length_ms - overlap_ms
+
+    for start_index in range(0, len(audio), step_ms):
+        end_index = min(start_index + chunk_length_ms, len(audio))
+        yield audio[start_index:end_index]
+        if end_index >= len(audio):
+            break
+
+
+def split_audio(
+    audio_path: str,
+    chunk_length_ms: int = 60000,
+    overlap_ms: int = DEFAULT_OVERLAP_MS,
+) -> list["AudioSegment"]:
     """Load an audio file and split it into fixed-length chunks.
 
     Args:
         audio_path: Path to the input audio file.
         chunk_length_ms: Length of each chunk in milliseconds.
+        overlap_ms: Overlap between adjacent chunks in milliseconds.
 
     Returns:
         A list of ``pydub.AudioSegment`` chunks.
 
     Raises:
-        ValueError: If ``audio_path`` is empty, not a file, or ``chunk_length_ms``
-            is not positive.
+        ValueError: If ``audio_path`` is empty, not a file, or chunk settings are
+            invalid.
         FileNotFoundError: If the input file does not exist.
         ImportError: If ``pydub`` is not installed.
         RuntimeError: If the file cannot be decoded.
     """
-    if not audio_path or not audio_path.strip():
-        raise ValueError("audio_path must not be empty.")
-
-    if chunk_length_ms <= 0:
-        raise ValueError("chunk_length_ms must be greater than 0.")
-
-    audio_file = Path(audio_path).expanduser()
-
-    if not audio_file.exists():
-        raise FileNotFoundError(f"Audio file not found: {audio_file}")
-
-    if not audio_file.is_file():
-        raise ValueError(f"Audio path is not a file: {audio_file}")
-
-    AudioSegment = _get_audio_segment_class()
-    audio_format = _infer_audio_format(audio_file)
-
-    load_errors: list[str] = []
-
-    try:
-        audio = _load_with_pydub(audio_file, audio_format, AudioSegment)
-    except RuntimeError as exc:
-        load_errors.append(str(exc))
-
-        try:
-            audio = _load_with_pyav(audio_file, AudioSegment)
-        except RuntimeError as fallback_exc:
-            load_errors.append(str(fallback_exc))
-            raise RuntimeError("Failed to decode audio file") from fallback_exc
-
-    return [
-        audio[start_index : start_index + chunk_length_ms]
-        for start_index in range(0, len(audio), chunk_length_ms)
-    ]
+    return list(
+        iter_audio_chunks(
+            audio_path,
+            chunk_length_ms=chunk_length_ms,
+            overlap_ms=overlap_ms,
+        )
+    )
 
 
 def export_chunks(
@@ -301,4 +374,10 @@ def export_chunks(
     return exported_files
 
 
-__all__ = ["split_audio", "export_chunks"]
+__all__ = [
+    "DEFAULT_OVERLAP_MS",
+    "split_audio",
+    "iter_audio_chunks",
+    "get_audio_duration_seconds",
+    "export_chunks",
+]

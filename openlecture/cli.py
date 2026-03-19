@@ -1,14 +1,19 @@
-"""CLI entrypoint for OpenLecture."""
+﻿"""CLI entrypoint for OpenLecture."""
 
-from contextlib import suppress
 import errno
-import os
 from pathlib import Path
+from typing import Callable
 
 import typer
 
 from .output_formatter import transcript_to_markdown
-from .transcribe import transcribe_audio
+from .transcribe import (
+    DEFAULT_BEAM_SIZE,
+    DEFAULT_COMPUTE_TYPE,
+    DEFAULT_DEVICE,
+    DEFAULT_MODEL_SIZE,
+    transcribe_audio,
+)
 
 app = typer.Typer()
 
@@ -58,6 +63,20 @@ def _write_output(output_path: Path, content: str) -> None:
         raise RuntimeError(f"Failed to write output file: {output_path}") from exc
 
 
+def _build_progress_callback() -> Callable[[int, int], None]:
+    """Create a simple CLI progress renderer based on chunk counts."""
+    last_reported = {"current": 0}
+
+    def progress_callback(current: int, total: int) -> None:
+        if current == last_reported["current"]:
+            return
+
+        last_reported["current"] = current
+        typer.secho(f"Processing chunk {current}/{total}", fg=typer.colors.YELLOW)
+
+    return progress_callback
+
+
 @app.command()
 def transcribe(
     audio_file: Path,
@@ -77,6 +96,32 @@ def transcribe(
         min=1,
         help="Split audio into chunks of this length before transcription.",
     ),
+    model: str = typer.Option(
+        DEFAULT_MODEL_SIZE,
+        "--model",
+        help="Whisper model size to load.",
+    ),
+    beam_size: int = typer.Option(
+        DEFAULT_BEAM_SIZE,
+        "--beam-size",
+        min=1,
+        help="Beam size used during decoding.",
+    ),
+    device: str = typer.Option(
+        DEFAULT_DEVICE,
+        "--device",
+        help="Execution device passed to faster-whisper.",
+    ),
+    compute_type: str = typer.Option(
+        DEFAULT_COMPUTE_TYPE,
+        "--compute-type",
+        help="Computation type passed to faster-whisper.",
+    ),
+    language: str | None = typer.Option(
+        None,
+        "--language",
+        help="Optional source language code. If omitted, Whisper auto-detects it.",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -89,12 +134,32 @@ def transcribe(
 
     try:
         output_path = _resolve_output_path(output or audio_file.with_suffix(".md"))
-        transcript = transcribe_audio(
-            str(audio_file),
-            show_progress=progress,
-            chunk_length_ms=chunk_length_ms,
-        )
-        markdown_transcript = transcript_to_markdown(transcript)
+        transcribe_kwargs = {
+            "show_progress": progress,
+            "chunk_length_ms": chunk_length_ms,
+            "status_callback": typer.echo,
+        }
+
+        if progress:
+            transcribe_kwargs["progress_callback"] = _build_progress_callback()
+
+        if model != DEFAULT_MODEL_SIZE:
+            transcribe_kwargs["model_size"] = model
+
+        if beam_size != DEFAULT_BEAM_SIZE:
+            transcribe_kwargs["beam_size"] = beam_size
+
+        if device != DEFAULT_DEVICE:
+            transcribe_kwargs["device"] = device
+
+        if compute_type != DEFAULT_COMPUTE_TYPE:
+            transcribe_kwargs["compute_type"] = compute_type
+
+        if language is not None:
+            transcribe_kwargs["language"] = language
+
+        segments = transcribe_audio(str(audio_file), **transcribe_kwargs)
+        markdown_transcript = transcript_to_markdown(segments)
         _write_output(output_path, markdown_transcript)
     except Exception as exc:
         if verbose:

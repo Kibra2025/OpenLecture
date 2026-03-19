@@ -1,38 +1,40 @@
-"""Helpers for converting transcripts into readable Markdown."""
+﻿"""Helpers for converting transcripts into readable Markdown."""
 
 from __future__ import annotations
+
+from .models import Segment
 
 MARKDOWN_TITLE = "# Lecture Transcript"
 
 
-def transcript_to_markdown(transcript: str) -> str:
-    """Convert a transcript string into simple Markdown paragraphs.
+def _format_timestamp(seconds: float) -> str:
+    """Format a timestamp in seconds as ``HH:MM:SS``."""
+    whole_seconds = max(0, int(seconds))
+    minutes, secs = divmod(whole_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
-    The transcript is split on periods, empty items are discarded, and each
-    sentence is rendered as its own paragraph under a single top-level heading.
 
-    Args:
-        transcript: Raw transcript text.
+def transcript_to_markdown(segments: list[Segment]) -> str:
+    """Convert structured transcript segments into timestamped Markdown."""
+    if not isinstance(segments, list):
+        raise TypeError("segments must be a list of Segment instances.")
 
-    Returns:
-        A Markdown-formatted transcript.
+    lines: list[str] = []
+    for segment in segments:
+        if not isinstance(segment, Segment):
+            raise TypeError("segments must be a list of Segment instances.")
 
-    Raises:
-        TypeError: If ``transcript`` is not a string.
-    """
-    if not isinstance(transcript, str):
-        raise TypeError("transcript must be a string.")
+        text = segment.text.strip()
+        if not text:
+            continue
 
-    sentences = [
-        f"{sentence}."
-        for sentence in (part.strip() for part in transcript.split("."))
-        if sentence
-    ]
+        lines.append(f"[{_format_timestamp(segment.start)}] {text}")
 
-    if not sentences:
+    if not lines:
         return MARKDOWN_TITLE
 
-    body = "\n\n".join(sentences)
+    body = "\n\n".join(lines)
     return f"{MARKDOWN_TITLE}\n\n{body}"
 
 

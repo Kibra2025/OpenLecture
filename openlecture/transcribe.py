@@ -1,28 +1,31 @@
-from contextvars import ContextVar
+﻿"""Core transcription pipeline for OpenLecture."""
+
+from __future__ import annotations
+
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
 from functools import lru_cache
-from importlib import import_module
 from math import ceil
 from pathlib import Path
-import shutil
-from time import perf_counter
-from typing import TYPE_CHECKING, Any, Iterator
-from uuid import uuid4
+import tempfile
+from typing import TYPE_CHECKING, Callable, Iterator
 
-from .audio_utils import export_chunks, split_audio
-import typer
+from .audio_utils import DEFAULT_OVERLAP_MS, get_audio_duration_seconds, iter_audio_chunks
+from .models import Segment
 
 if TYPE_CHECKING:
     from faster_whisper import WhisperModel
+    from pydub import AudioSegment
 
-# Define which version of the AI model to use
-MODEL_SIZE = "medium"
+
+StatusCallback = Callable[[str], None]
+ProgressCallback = Callable[[int, int], None]
+
+DEFAULT_MODEL_SIZE = "medium"
+DEFAULT_BEAM_SIZE = 5
+DEFAULT_DEVICE = "auto"
+DEFAULT_COMPUTE_TYPE = "auto"
 DEFAULT_CHUNK_LENGTH_MS = 60_000
-PROGRESS_BAR_FORMAT = (
-    "{desc}: {percentage:3.0f}%|{bar}| total {audio_done}/{audio_total} | "
-    "chunk {chunk_done}/{chunk_total} | {speed_label} | ETA {eta_human}"
-)
+SMALL_FILE_CHUNKING_THRESHOLD_SECONDS = 300
 
 
 def _format_clock(seconds: float | None, *, round_up: bool = False) -> str:
@@ -40,261 +43,84 @@ def _format_clock(seconds: float | None, *, round_up: bool = False) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _estimate_remaining(
-    completed: float,
-    total: float | None,
-    elapsed: float | None,
-) -> float | None:
-    """Estimate the remaining wall-clock time from audio progress."""
-    if total is not None and completed >= total:
-        return 0.0
-
-    if total and completed > 0 and elapsed and elapsed > 0:
-        return max(0.0, (total - completed) * (elapsed / completed))
-
-    return None
+def _emit_status(status_callback: StatusCallback | None, message: str) -> None:
+    """Send a status message to the caller when a callback is provided."""
+    if status_callback is not None:
+        status_callback(message)
 
 
-def _format_speed(completed: float, elapsed: float | None) -> str:
-    """Format transcription throughput as audio seconds processed per second."""
-    if elapsed and elapsed > 0 and completed > 0:
-        return f"{completed / elapsed:.2f}x"
-
-    return "--.-x"
-
-
-@dataclass(frozen=True)
-class _ProgressState:
-    chunk_index: int
-    total_chunks: int
-    completed_before_seconds: float
-    total_audio_seconds: float
-    chunk_audio_seconds: float
-    started_at: float
-
-
-_PROGRESS_STATE: ContextVar[_ProgressState | None] = ContextVar(
-    "openlecture_progress_state",
-    default=None,
-)
-
-
-@dataclass
-class _ProgressSession:
-    bar: Any = None
-    active_state: _ProgressState | None = None
-
-
-_PROGRESS_SESSION: ContextVar[_ProgressSession | None] = ContextVar(
-    "openlecture_progress_session",
-    default=None,
-)
-
-
-@contextmanager
-def _progress_state_scope(state: _ProgressState | None) -> Iterator[None]:
-    token = _PROGRESS_STATE.set(state)
-    try:
-        yield
-    finally:
-        _PROGRESS_STATE.reset(token)
-
-
-@contextmanager
-def _progress_bar_session(enabled: bool) -> Iterator[None]:
-    if not enabled:
-        yield
-        return
-
-    session = _ProgressSession()
-    token = _PROGRESS_SESSION.set(session)
-    try:
-        yield
-    finally:
-        if session.bar is not None:
-            session.bar.close()
-        _PROGRESS_SESSION.reset(token)
-
-
-def _format_chunk_label(state: _ProgressState) -> str:
-    """Render the current chunk label for the shared progress bar."""
-    return f"Chunk {state.chunk_index}/{state.total_chunks}"
-
-
-def _configure_progress_bar_kwargs(kwargs: dict[str, Any]) -> None:
-    """Apply consistent CLI-friendly progress bar defaults."""
-    kwargs.setdefault("dynamic_ncols", True)
-    kwargs.setdefault("bar_format", PROGRESS_BAR_FORMAT)
-    kwargs.setdefault("leave", True)
-    kwargs.setdefault("mininterval", 0.0)
-    kwargs.setdefault("miniters", 1)
-    kwargs.setdefault("smoothing", 0.0)
-
-
-def _build_whisper_progress_bar(base_tqdm):
-    class _ManagedWhisperProgressBar(base_tqdm):
-        def __init__(self, *args, session: _ProgressSession | None = None, **kwargs):
-            self._progress_session = session
-            super().__init__(*args, **kwargs)
-
-        @property
-        def format_dict(self):
-            data = super().format_dict
-            total = data.get("total")
-            completed = float(data.get("n", 0.0))
-            progress_state = None
-
-            if self._progress_session is not None:
-                progress_state = self._progress_session.active_state
-
-            if progress_state is None:
-                elapsed = data.get("elapsed", 0.0)
-                chunk_completed = completed
-                chunk_total = total
-            else:
-                elapsed = perf_counter() - progress_state.started_at
-                chunk_completed = max(
-                    0.0,
-                    completed - progress_state.completed_before_seconds,
-                )
-                chunk_total = progress_state.chunk_audio_seconds
-
-            remaining = _estimate_remaining(completed, total, elapsed)
-
-            data.update(
-                audio_done=_format_clock(completed),
-                audio_total=_format_clock(total),
-                chunk_done=_format_clock(chunk_completed),
-                chunk_total=_format_clock(chunk_total),
-                eta_human=_format_clock(remaining, round_up=True),
-                speed_label=_format_speed(completed, elapsed),
-            )
-            return data
-
-    class WhisperProgressBar:
-        def __init__(self, *args, **kwargs):
-            self._progress_state = _PROGRESS_STATE.get()
-            self._progress_session = _PROGRESS_SESSION.get()
-            self._is_shared_bar = (
-                self._progress_state is not None and self._progress_session is not None
-            )
-
-            if self._is_shared_bar:
-                self._progress_session.active_state = self._progress_state
-                self._bar = self._prepare_shared_bar(*args, **kwargs)
-            else:
-                self._bar = self._create_standalone_bar(*args, **kwargs)
-
-        def _prepare_shared_bar(self, *args, **kwargs):
-            progress_state = self._progress_state
-            session = self._progress_session
-
-            if session.bar is None:
-                kwargs["total"] = progress_state.total_audio_seconds
-                kwargs["initial"] = progress_state.completed_before_seconds
-                kwargs.setdefault("desc", _format_chunk_label(progress_state))
-                _configure_progress_bar_kwargs(kwargs)
-                session.bar = _ManagedWhisperProgressBar(
-                    *args,
-                    session=session,
-                    **kwargs,
-                )
-                return session.bar
-
-            session.bar.n = max(
-                float(session.bar.n),
-                progress_state.completed_before_seconds,
-            )
-            session.bar.last_print_n = session.bar.n
-            session.bar.set_description_str(
-                _format_chunk_label(progress_state),
-                refresh=False,
-            )
-            session.bar.refresh()
-            return session.bar
-
-        def _create_standalone_bar(self, *args, **kwargs):
-            if self._progress_state is None:
-                kwargs.setdefault("desc", "Transcribing")
-            else:
-                kwargs["total"] = self._progress_state.total_audio_seconds
-                kwargs["initial"] = self._progress_state.completed_before_seconds
-                kwargs.setdefault("desc", _format_chunk_label(self._progress_state))
-
-            _configure_progress_bar_kwargs(kwargs)
-            return _ManagedWhisperProgressBar(*args, **kwargs)
-
-        def update(self, n=1):
-            self._bar.update(n)
-
-        def close(self):
-            if not self._is_shared_bar:
-                self._bar.close()
-                return
-
-            if self._progress_state.chunk_index >= self._progress_state.total_chunks:
-                self._bar.refresh()
-                self._bar.close()
-                self._progress_session.bar = None
-            else:
-                self._bar.refresh()
-
-        def __getattr__(self, name):
-            return getattr(self._bar, name)
-
-    return WhisperProgressBar
-
-
-@contextmanager
-def _patched_whisper_progress_bar(
-    enabled: bool,
+def _report_progress(
     *,
-    progress_state: _ProgressState | None = None,
-) -> Iterator[None]:
-    if not enabled:
-        yield
+    show_progress: bool,
+    progress_callback: ProgressCallback | None,
+    status_callback: StatusCallback | None,
+    current: int,
+    total: int,
+) -> None:
+    """Report chunk-level progress with a safe fallback to status messages."""
+    if not show_progress:
         return
 
-    whisper_transcribe = import_module("faster_whisper.transcribe")
-    original_tqdm = whisper_transcribe.tqdm
-    whisper_transcribe.tqdm = _build_whisper_progress_bar(original_tqdm)
+    if progress_callback is not None:
+        try:
+            progress_callback(current, total)
+            return
+        except Exception:
+            pass
 
-    try:
-        with _progress_state_scope(progress_state):
-            yield
-    finally:
-        whisper_transcribe.tqdm = original_tqdm
+    _emit_status(status_callback, f"Processing chunk {current}/{total}")
+
+
+def _normalize_required_text_option(name: str, value: str) -> str:
+    """Normalize required text configuration values."""
+    if not value or not value.strip():
+        raise ValueError(f"{name} must not be empty.")
+
+    return value.strip()
+
+
+def _normalize_language(language: str | None) -> str | None:
+    """Normalize the optional Whisper language parameter."""
+    if language is None:
+        return None
+
+    normalized = language.strip()
+    return normalized or None
+
+
+def _validate_transcription_options(
+    *,
+    chunk_length_ms: int,
+    beam_size: int,
+    overlap_ms: int,
+) -> None:
+    """Validate transcription options exposed to callers."""
+    if chunk_length_ms <= 0:
+        raise ValueError("chunk_length_ms must be greater than 0.")
+
+    if beam_size <= 0:
+        raise ValueError("beam_size must be greater than 0.")
+
+    if overlap_ms < 0:
+        raise ValueError("overlap_ms must be greater than or equal to 0.")
+
+    if overlap_ms >= chunk_length_ms:
+        raise ValueError("overlap_ms must be smaller than chunk_length_ms.")
 
 
 @contextmanager
-def _temporary_chunk_directory(audio_file: Path) -> Iterator[Path]:
-    """Create a writable temporary directory for exported chunks."""
-    candidate_roots = (
-        Path.cwd() / ".openlecture_tmp",
-        audio_file.parent / ".openlecture_tmp",
-    )
+def _temporary_chunk_file() -> Iterator[Path]:
+    """Create a temporary WAV file for a single exported chunk."""
+    temp_path: Path | None = None
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+        temp_path = Path(temp_file.name)
 
-    for root in candidate_roots:
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-            temp_dir = root / f"chunks_{uuid4().hex}"
-            temp_dir.mkdir()
-            try:
-                yield temp_dir
-            finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            with suppress(OSError):
-                root.rmdir()
-            return
-        except OSError:
-            continue
-
-    temp_dir = Path.cwd() / f"openlecture_chunks_{uuid4().hex}"
-    temp_dir.mkdir(parents=True, exist_ok=True)
     try:
-        yield temp_dir
+        yield temp_path
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        if temp_path is not None:
+            with suppress(OSError):
+                temp_path.unlink()
 
 
 def _validate_audio_file(audio_path: str) -> Path:
@@ -313,118 +139,261 @@ def _validate_audio_file(audio_path: str) -> Path:
     return audio_file
 
 
-# This "decorator" saves the model in memory so we don't reload it every time
-@lru_cache(maxsize=1)
-def _get_model() -> "WhisperModel":
-    """Loads the Whisper model and keeps it cached."""
-
+@lru_cache(maxsize=8)
+def _get_model(
+    model_size: str = DEFAULT_MODEL_SIZE,
+    device: str = DEFAULT_DEVICE,
+    compute_type: str = DEFAULT_COMPUTE_TYPE,
+) -> "WhisperModel":
+    """Load and cache a Whisper model for the given runtime configuration."""
     from faster_whisper import WhisperModel
 
-    typer.echo("Loading Whisper model...")
-
     return WhisperModel(
-        MODEL_SIZE,
-        device="auto",
-        compute_type="auto",
+        model_size,
+        device=device,
+        compute_type=compute_type,
     )
+
+
+def _load_model(
+    *,
+    model_size: str,
+    device: str,
+    compute_type: str,
+) -> "WhisperModel":
+    """Load a Whisper model while preserving no-argument compatibility for defaults."""
+    if (
+        model_size == DEFAULT_MODEL_SIZE
+        and device == DEFAULT_DEVICE
+        and compute_type == DEFAULT_COMPUTE_TYPE
+    ):
+        return _get_model()
+
+    return _get_model(
+        model_size=model_size,
+        device=device,
+        compute_type=compute_type,
+    )
+
 
 def _transcribe_file(
     model: "WhisperModel",
     audio_file: Path,
     *,
     show_progress: bool,
-    progress_state: _ProgressState | None = None,
-) -> list[str]:
-    """Transcribe a single audio file and return its text segments."""
-    transcript_parts: list[str] = []
+    beam_size: int = DEFAULT_BEAM_SIZE,
+    language: str | None = None,
+    time_offset_seconds: float = 0.0,
+) -> list[Segment]:
+    """Transcribe a single audio file and return structured segments."""
+    transcript_segments: list[Segment] = []
+    transcribe_kwargs = {
+        "beam_size": beam_size,
+        "vad_filter": True,
+    }
 
-    with _patched_whisper_progress_bar(
-        show_progress,
-        progress_state=progress_state,
-    ):
-        segments, _ = model.transcribe(
-            str(audio_file),
-            beam_size=5,
-            vad_filter=True,
-            log_progress=show_progress,
+    if language is not None:
+        transcribe_kwargs["language"] = language
+
+    segments, _ = model.transcribe(str(audio_file), **transcribe_kwargs)
+
+    for segment in segments:
+        text = segment.text.strip()
+        if not text:
+            continue
+
+        transcript_segments.append(
+            Segment(
+                start=time_offset_seconds + float(segment.start),
+                end=time_offset_seconds + float(segment.end),
+                text=text,
+            )
         )
 
-        for segment in segments:
-            if segment.text.strip():
-                transcript_parts.append(segment.text.strip())
+    return transcript_segments
 
-    return transcript_parts
+
+def _estimate_total_chunks(
+    total_audio_seconds: float,
+    chunk_length_ms: int,
+    overlap_ms: int,
+) -> int:
+    """Estimate how many overlapped chunks an audio file will produce."""
+    if total_audio_seconds <= 0:
+        return 1
+
+    chunk_length_seconds = chunk_length_ms / 1000
+    if total_audio_seconds <= chunk_length_seconds:
+        return 1
+
+    step_seconds = (chunk_length_ms - overlap_ms) / 1000
+    remaining_seconds = total_audio_seconds - chunk_length_seconds
+    return max(1, 1 + ceil(remaining_seconds / step_seconds))
+
+
+def _discard_processed_overlap_segments(
+    segments: list[Segment],
+    *,
+    chunk_start_seconds: float,
+    overlap_ms: int,
+) -> list[Segment]:
+    """Discard segments that fall fully inside the already-processed overlap."""
+    if overlap_ms <= 0:
+        return segments
+
+    overlap_cutoff_seconds = chunk_start_seconds + (overlap_ms / 1000)
+    return [segment for segment in segments if segment.end > overlap_cutoff_seconds]
+
+
+def _transcribe_chunk(
+    model: "WhisperModel",
+    chunk: "AudioSegment",
+    *,
+    show_progress: bool,
+    beam_size: int = DEFAULT_BEAM_SIZE,
+    language: str | None = None,
+    time_offset_seconds: float = 0.0,
+) -> list[Segment]:
+    """Export one chunk, transcribe it, and delete the temporary file."""
+    with _temporary_chunk_file() as chunk_path:
+        chunk.export(str(chunk_path), format="wav")
+        return _transcribe_file(
+            model,
+            chunk_path,
+            show_progress=show_progress,
+            beam_size=beam_size,
+            language=language,
+            time_offset_seconds=time_offset_seconds,
+        )
 
 
 def transcribe_audio(
     audio_path: str,
     show_progress: bool = True,
     chunk_length_ms: int = DEFAULT_CHUNK_LENGTH_MS,
-) -> str:
-    """Transcribe an audio file by splitting it into smaller chunks first."""
-    if chunk_length_ms <= 0:
-        raise ValueError("chunk_length_ms must be greater than 0.")
+    status_callback: StatusCallback | None = None,
+    progress_callback: ProgressCallback | None = None,
+    model_size: str = DEFAULT_MODEL_SIZE,
+    beam_size: int = DEFAULT_BEAM_SIZE,
+    device: str = DEFAULT_DEVICE,
+    compute_type: str = DEFAULT_COMPUTE_TYPE,
+    language: str | None = None,
+    overlap_ms: int = DEFAULT_OVERLAP_MS,
+) -> list[Segment]:
+    """Transcribe an audio file into structured segments.
+
+    The pipeline chunks only large files, preserves absolute segment timestamps,
+    and reports chunk-level progress through optional callbacks.
+    """
+    _validate_transcription_options(
+        chunk_length_ms=chunk_length_ms,
+        beam_size=beam_size,
+        overlap_ms=overlap_ms,
+    )
+
+    normalized_model_size = _normalize_required_text_option("model_size", model_size)
+    normalized_device = _normalize_required_text_option("device", device)
+    normalized_compute_type = _normalize_required_text_option(
+        "compute_type",
+        compute_type,
+    )
+    normalized_language = _normalize_language(language)
 
     audio_file = _validate_audio_file(audio_path)
 
+    _emit_status(status_callback, "Loading Whisper model...")
+
     try:
-        model = _get_model()
+        model = _load_model(
+            model_size=normalized_model_size,
+            device=normalized_device,
+            compute_type=normalized_compute_type,
+        )
     except Exception as exc:
         raise RuntimeError("Failed to load Whisper model") from exc
 
-    typer.echo("Splitting audio into chunks...")
-
     try:
-        chunks = split_audio(str(audio_file), chunk_length_ms=chunk_length_ms)
+        total_audio_seconds = get_audio_duration_seconds(str(audio_file))
     except (FileNotFoundError, ValueError):
         raise
     except Exception as exc:
         raise RuntimeError("Failed to decode audio file") from exc
 
-    chunk_durations = [len(chunk) / 1000 for chunk in chunks]
-    total_audio_seconds = sum(chunk_durations)
+    if total_audio_seconds < SMALL_FILE_CHUNKING_THRESHOLD_SECONDS:
+        _emit_status(
+            status_callback,
+            f"Transcribing audio directly ({_format_clock(total_audio_seconds)} total audio)...",
+        )
 
-    typer.echo(
-        f"Transcribing {len(chunks)} chunk(s) "
-        f"({_format_clock(total_audio_seconds)} total audio)..."
+        transcript_segments = _transcribe_file(
+            model,
+            audio_file,
+            show_progress=show_progress,
+            beam_size=beam_size,
+            language=normalized_language,
+            time_offset_seconds=0.0,
+        )
+        _report_progress(
+            show_progress=show_progress,
+            progress_callback=progress_callback,
+            status_callback=status_callback,
+            current=1,
+            total=1,
+        )
+        return transcript_segments
+
+    _emit_status(status_callback, "Splitting audio into chunks...")
+
+    total_chunks = _estimate_total_chunks(total_audio_seconds, chunk_length_ms, overlap_ms)
+    _emit_status(
+        status_callback,
+        f"Transcribing {total_chunks} chunk(s) ({_format_clock(total_audio_seconds)} total audio)...",
     )
 
-    transcript_parts: list[str] = []
-    started_at = perf_counter()
-    completed_audio_seconds = 0.0
+    transcript_segments: list[Segment] = []
+    current_chunk_start_seconds = 0.0
+    overlap_seconds = overlap_ms / 1000
 
     try:
-        with _progress_bar_session(show_progress):
-            with _temporary_chunk_directory(audio_file) as temp_dir:
-                chunk_paths = export_chunks(chunks, temp_dir)
+        for index, chunk in enumerate(
+            iter_audio_chunks(
+                str(audio_file),
+                chunk_length_ms=chunk_length_ms,
+                overlap_ms=overlap_ms,
+            ),
+            start=1,
+        ):
+            chunk_duration_seconds = len(chunk) / 1000
 
-                for index, (chunk_path, chunk_duration) in enumerate(
-                    zip(chunk_paths, chunk_durations, strict=True),
-                    start=1,
-                ):
-                    progress_state = None
-                    if show_progress:
-                        progress_state = _ProgressState(
-                            chunk_index=index,
-                            total_chunks=len(chunk_paths),
-                            completed_before_seconds=completed_audio_seconds,
-                            total_audio_seconds=total_audio_seconds,
-                            chunk_audio_seconds=chunk_duration,
-                            started_at=started_at,
-                        )
-                    else:
-                        typer.echo(f"Transcribing chunk {index}/{len(chunk_paths)}...")
+            if not show_progress:
+                _emit_status(status_callback, f"Transcribing chunk {index}/{total_chunks}...")
 
-                    transcript_parts.extend(
-                        _transcribe_file(
-                            model,
-                            chunk_path,
-                            show_progress=show_progress,
-                            progress_state=progress_state,
-                        )
-                    )
-                    completed_audio_seconds += chunk_duration
+            chunk_segments = _transcribe_chunk(
+                model,
+                chunk,
+                show_progress=show_progress,
+                beam_size=beam_size,
+                language=normalized_language,
+                time_offset_seconds=current_chunk_start_seconds,
+            )
+
+            if index > 1:
+                chunk_segments = _discard_processed_overlap_segments(
+                    chunk_segments,
+                    chunk_start_seconds=current_chunk_start_seconds,
+                    overlap_ms=overlap_ms,
+                )
+
+            transcript_segments.extend(chunk_segments)
+            _report_progress(
+                show_progress=show_progress,
+                progress_callback=progress_callback,
+                status_callback=status_callback,
+                current=index,
+                total=total_chunks,
+            )
+            current_chunk_start_seconds += max(0.0, chunk_duration_seconds - overlap_seconds)
     except Exception as exc:
         raise RuntimeError(f"Failed to transcribe audio file: {audio_file}") from exc
 
-    return " ".join(transcript_parts)
+    return transcript_segments

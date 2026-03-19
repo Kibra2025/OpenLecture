@@ -13,7 +13,7 @@ Ordine di lavoro consigliato:
 3. conservare piu struttura nel transcript
 4. ottimizzare solo dopo avere misure reali
 
-## Fase 0 - Baseline Affidabile
+## Fase 0 - Baseline Affidabile - Fatto
 
 Obiettivo: mettere in sicurezza il progetto prima di fare refactor piu profondi.
 
@@ -43,7 +43,7 @@ Obiettivo: mettere in sicurezza il progetto prima di fare refactor piu profondi.
 
 Nota: questa fase ha la priorita piu alta. Senza di lei, ogni refactor successivo diventa fragile.
 
-## Fase 1 - Hardening UX ed Errori
+## Fase 1 - Hardening UX ed Errori - Fatto
 
 Obiettivo: rendere il tool piu prevedibile e piu facile da diagnosticare.
 
@@ -63,7 +63,7 @@ Obiettivo: rendere il tool piu prevedibile e piu facile da diagnosticare.
   Files: `openlecture/cli.py`, `openlecture/transcribe.py`
   Done when: si usa uno stile unico per progressi, warning ed errori, senza mix casuale di `print()` e CLI output.
 
-## Fase 2 - Efficienza a Basso Rischio
+## Fase 2 - Efficienza a Basso Rischio - Fatto
 
 Obiettivo: ridurre RAM, I/O su disco e overhead inutile senza cambiare troppo l'architettura.
 
@@ -85,7 +85,7 @@ Obiettivo: ridurre RAM, I/O su disco e overhead inutile senza cambiare troppo l'
 
 Nota: questa e la fase con il miglior ritorno pratico sulle performance.
 
-## Fase 3 - Transcript Strutturato
+## Fase 3 - Transcript Strutturato - fatto
 
 Obiettivo: smettere di perdere informazione utile troppo presto.
 

@@ -1,4 +1,4 @@
-"""CLI tests for OpenLecture."""
+﻿"""CLI tests for OpenLecture."""
 
 from pathlib import Path
 
@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from openlecture import cli
+from openlecture.models import Segment
 
 
 runner = CliRunner()
@@ -33,11 +34,16 @@ def test_default_output_file_is_created(
         *,
         show_progress: bool,
         chunk_length_ms: int,
-    ) -> str:
+        status_callback,
+    ) -> list[Segment]:
         assert audio_path == str(audio_file)
         assert show_progress is False
         assert chunk_length_ms == 120000
-        return "First sentence. Second sentence."
+        assert status_callback is not None
+        return [
+            Segment(start=1.0, end=2.0, text="First sentence."),
+            Segment(start=3.0, end=4.0, text="Second sentence."),
+        ]
 
     monkeypatch.setattr(cli, "transcribe_audio", fake_transcribe_audio)
 
@@ -50,9 +56,56 @@ def test_default_output_file_is_created(
     assert result.exit_code == 0
     assert output_file.exists()
     assert output_file.read_text(encoding="utf-8") == (
-        "# Lecture Transcript\n\nFirst sentence.\n\nSecond sentence."
+        "# Lecture Transcript\n\n[00:00:01] First sentence.\n\n[00:00:03] Second sentence."
     )
     assert f"Transcript saved to {output_file}" in result.output
+
+
+def test_cli_forwards_custom_transcription_options(
+    workspace_tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The CLI should forward custom Whisper options to the transcription layer."""
+    audio_file = workspace_tmp_path / "lecture.mp3"
+    audio_file.write_bytes(b"fake audio")
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_transcribe_audio(audio_path: str, **kwargs) -> list[Segment]:
+        assert audio_path == str(audio_file)
+        captured_kwargs.update(kwargs)
+        return [Segment(start=0.0, end=1.0, text="Only sentence.")]
+
+    monkeypatch.setattr(cli, "transcribe_audio", fake_transcribe_audio)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            str(audio_file),
+            "--no-progress",
+            "--model",
+            "small",
+            "--beam-size",
+            "3",
+            "--device",
+            "cpu",
+            "--compute-type",
+            "int8",
+            "--language",
+            "it",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured_kwargs == {
+        "show_progress": False,
+        "chunk_length_ms": 60000,
+        "status_callback": cli.typer.echo,
+        "model_size": "small",
+        "beam_size": 3,
+        "device": "cpu",
+        "compute_type": "int8",
+        "language": "it",
+    }
 
 
 def test_custom_output_file_is_created(
@@ -64,8 +117,8 @@ def test_custom_output_file_is_created(
     audio_file.write_bytes(b"fake audio")
     output_file = workspace_tmp_path / "custom.md"
 
-    def fake_transcribe_audio(*args, **kwargs) -> str:
-        return "Only sentence."
+    def fake_transcribe_audio(*args, **kwargs) -> list[Segment]:
+        return [Segment(start=0.0, end=1.0, text="Only sentence.")]
 
     monkeypatch.setattr(cli, "transcribe_audio", fake_transcribe_audio)
 
@@ -77,7 +130,7 @@ def test_custom_output_file_is_created(
     assert result.exit_code == 0
     assert output_file.exists()
     assert output_file.read_text(encoding="utf-8") == (
-        "# Lecture Transcript\n\nOnly sentence."
+        "# Lecture Transcript\n\n[00:00:00] Only sentence."
     )
     assert not audio_file.with_suffix(".md").exists()
 
@@ -91,8 +144,8 @@ def test_output_parent_directories_are_created(
     audio_file.write_bytes(b"fake audio")
     output_file = workspace_tmp_path / "nested" / "dir" / "custom.md"
 
-    def fake_transcribe_audio(*args, **kwargs) -> str:
-        return "Only sentence."
+    def fake_transcribe_audio(*args, **kwargs) -> list[Segment]:
+        return [Segment(start=0.0, end=1.0, text="Only sentence.")]
 
     monkeypatch.setattr(cli, "transcribe_audio", fake_transcribe_audio)
 
@@ -104,7 +157,7 @@ def test_output_parent_directories_are_created(
     assert result.exit_code == 0
     assert output_file.exists()
     assert output_file.read_text(encoding="utf-8") == (
-        "# Lecture Transcript\n\nOnly sentence."
+        "# Lecture Transcript\n\n[00:00:00] Only sentence."
     )
 
 
@@ -131,7 +184,7 @@ def test_cli_shows_clean_error_message_without_verbose(
     audio_file = workspace_tmp_path / "lecture.mp3"
     audio_file.write_bytes(b"fake audio")
 
-    def fail_transcription(*args, **kwargs) -> str:
+    def fail_transcription(*args, **kwargs) -> list[Segment]:
         raise RuntimeError("Failed to load Whisper model")
 
     monkeypatch.setattr(cli, "transcribe_audio", fail_transcription)
@@ -151,7 +204,7 @@ def test_cli_reraises_errors_in_verbose_mode(
     audio_file = workspace_tmp_path / "lecture.mp3"
     audio_file.write_bytes(b"fake audio")
 
-    def fail_transcription(*args, **kwargs) -> str:
+    def fail_transcription(*args, **kwargs) -> list[Segment]:
         raise RuntimeError("Failed to load Whisper model")
 
     monkeypatch.setattr(cli, "transcribe_audio", fail_transcription)
