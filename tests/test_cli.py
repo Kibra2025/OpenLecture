@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from openlecture import cli
@@ -81,6 +82,32 @@ def test_custom_output_file_is_created(
     assert not audio_file.with_suffix(".md").exists()
 
 
+def test_output_parent_directories_are_created(
+    workspace_tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The CLI should create missing parent directories for the output file."""
+    audio_file = workspace_tmp_path / "lecture.mp3"
+    audio_file.write_bytes(b"fake audio")
+    output_file = workspace_tmp_path / "nested" / "dir" / "custom.md"
+
+    def fake_transcribe_audio(*args, **kwargs) -> str:
+        return "Only sentence."
+
+    monkeypatch.setattr(cli, "transcribe_audio", fake_transcribe_audio)
+
+    result = runner.invoke(
+        cli.app,
+        [str(audio_file), "--output", str(output_file)],
+    )
+
+    assert result.exit_code == 0
+    assert output_file.exists()
+    assert output_file.read_text(encoding="utf-8") == (
+        "# Lecture Transcript\n\nOnly sentence."
+    )
+
+
 def test_missing_input_argument_returns_error() -> None:
     """The CLI should reject invocations without an audio file."""
     result = runner.invoke(cli.app, [])
@@ -94,3 +121,40 @@ def test_cli_uses_root_command_style() -> None:
     result = runner.invoke(cli.app, ["transcribe", "lecture.mp3"])
 
     assert result.exit_code == 2
+
+
+def test_cli_shows_clean_error_message_without_verbose(
+    workspace_tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The CLI should show a concise error in normal mode."""
+    audio_file = workspace_tmp_path / "lecture.mp3"
+    audio_file.write_bytes(b"fake audio")
+
+    def fail_transcription(*args, **kwargs) -> str:
+        raise RuntimeError("Failed to load Whisper model")
+
+    monkeypatch.setattr(cli, "transcribe_audio", fail_transcription)
+
+    result = runner.invoke(cli.app, [str(audio_file)])
+
+    assert result.exit_code == 1
+    assert "Error: Failed to load Whisper model" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_reraises_errors_in_verbose_mode(
+    workspace_tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The CLI should re-raise exceptions when verbose mode is enabled."""
+    audio_file = workspace_tmp_path / "lecture.mp3"
+    audio_file.write_bytes(b"fake audio")
+
+    def fail_transcription(*args, **kwargs) -> str:
+        raise RuntimeError("Failed to load Whisper model")
+
+    monkeypatch.setattr(cli, "transcribe_audio", fail_transcription)
+
+    with pytest.raises(RuntimeError, match="Failed to load Whisper model"):
+        runner.invoke(cli.app, [str(audio_file), "--verbose"], catch_exceptions=False)

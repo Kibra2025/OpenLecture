@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 from uuid import uuid4
 
 from .audio_utils import export_chunks, split_audio
+import typer
 
 if TYPE_CHECKING:
     from faster_whisper import WhisperModel
@@ -319,7 +320,7 @@ def _get_model() -> "WhisperModel":
 
     from faster_whisper import WhisperModel
 
-    print("Loading Whisper model...")
+    typer.echo("Loading Whisper model...")
 
     return WhisperModel(
         MODEL_SIZE,
@@ -369,19 +370,21 @@ def transcribe_audio(
     try:
         model = _get_model()
     except Exception as exc:
-        raise RuntimeError("Failed to load Whisper model.") from exc
+        raise RuntimeError("Failed to load Whisper model") from exc
 
-    print("Splitting audio into chunks...")
+    typer.echo("Splitting audio into chunks...")
 
     try:
         chunks = split_audio(str(audio_file), chunk_length_ms=chunk_length_ms)
+    except (FileNotFoundError, ValueError):
+        raise
     except Exception as exc:
-        raise RuntimeError(f"Failed to split audio file: {audio_file}") from exc
+        raise RuntimeError("Failed to decode audio file") from exc
 
     chunk_durations = [len(chunk) / 1000 for chunk in chunks]
     total_audio_seconds = sum(chunk_durations)
 
-    print(
+    typer.echo(
         f"Transcribing {len(chunks)} chunk(s) "
         f"({_format_clock(total_audio_seconds)} total audio)..."
     )
@@ -410,7 +413,7 @@ def transcribe_audio(
                             started_at=started_at,
                         )
                     else:
-                        print(f"Transcribing chunk {index}/{len(chunk_paths)}...")
+                        typer.echo(f"Transcribing chunk {index}/{len(chunk_paths)}...")
 
                     transcript_parts.extend(
                         _transcribe_file(

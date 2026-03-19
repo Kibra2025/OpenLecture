@@ -128,7 +128,7 @@ def _load_with_pydub(
             "ffmpeg/ffprobe is not installed or is not available on PATH."
         ) from exc
     except Exception as exc:
-        raise RuntimeError(f"pydub could not decode the file: {audio_file}") from exc
+        raise RuntimeError("Failed to decode audio file") from exc
 
 
 def _load_with_pyav(audio_file: Path, audio_segment_class) -> "AudioSegment":
@@ -195,7 +195,7 @@ def _load_with_pyav(audio_file: Path, audio_segment_class) -> "AudioSegment":
             channels=channels,
         )
     except Exception as exc:
-        raise RuntimeError(f"PyAV could not decode the file: {audio_file}") from exc
+        raise RuntimeError("Failed to decode audio file") from exc
 
 
 def split_audio(audio_path: str, chunk_length_ms: int = 60000) -> list["AudioSegment"]:
@@ -243,10 +243,7 @@ def split_audio(audio_path: str, chunk_length_ms: int = 60000) -> list["AudioSeg
             audio = _load_with_pyav(audio_file, AudioSegment)
         except RuntimeError as fallback_exc:
             load_errors.append(str(fallback_exc))
-            error_details = " ".join(load_errors)
-            raise RuntimeError(
-                f"Failed to load audio file: {audio_file}. {error_details}"
-            ) from fallback_exc
+            raise RuntimeError("Failed to decode audio file") from fallback_exc
 
     return [
         audio[start_index : start_index + chunk_length_ms]
