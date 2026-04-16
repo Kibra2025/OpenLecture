@@ -1,39 +1,59 @@
-﻿# OpenLecture
+# OpenLecture
 
-OpenLecture is an open-source CLI for transcribing lectures and long-form audio.
+OpenLecture is an open-source Python CLI for transcribing lectures and other long-form audio into Markdown.
 
-By default it uses `faster-whisper`, and it also ships with an optional `transformers` backend for environments where PyTorch is a better fit, including AMD GPU setups.
+The project is intentionally small in scope: it focuses on local transcription, a simple terminal interface, and a reusable internal pipeline that can be extended later.
 
-It is designed to be simple to run from the terminal, while keeping the transcription pipeline reusable as a Python module.
+By default it uses `faster-whisper`. It also includes an optional `transformers` backend for environments where PyTorch is the better fit, including AMD GPU setups through ROCm or DirectML.
 
-## What It Does
+## What The Project Is
 
-- Transcribes audio files into Markdown
-- Produces timestamped transcript lines
-- Can optionally omit timestamps in Markdown output
-- Supports both `faster-whisper` and `transformers` backends
-- Can use AMD GPUs through the `transformers` backend with ROCm or DirectML
+OpenLecture is:
+
+- a local CLI tool
+- a Python package with a reusable transcription pipeline
+- a Markdown transcript generator
+- a dual-backend Whisper wrapper
+- a codebase prepared for future output formats
+
+OpenLecture is not:
+
+- a web app
+- an HTTP API
+- a database-backed service
+- a diarization tool
+- a summarizer
+- an exporter for JSON, SRT, or VTT yet
+
+## Features
+
+- Transcribes a local audio file into Markdown
+- Writes timestamped transcript lines by default
+- Can omit timestamps with a CLI flag
+- Supports both `faster-whisper` and `transformers`
+- Supports AMD-oriented device aliases through the `transformers` backend
 - Skips chunking for short files
-- Splits long files into overlapping chunks to reduce word cuts at boundaries
-- Exposes model and decoding controls from the CLI
+- Splits long files into overlapping chunks
+- Drops duplicate segments that fall entirely inside already-processed overlap
+- Exposes model and decoding controls through the CLI
 - Returns structured `Segment` objects from the internal Python API
 
 ## Requirements
 
 - Python 3.10+
-- `ffmpeg` available on your system
+- `ffmpeg` available on the system
 
-OpenLecture uses `pydub` for chunking and `PyAV` as a decoding fallback. In practice, having `ffmpeg` installed is still the safest setup.
+The audio pipeline uses `pydub` for chunking and `PyAV` as a decoding fallback. In practice, having `ffmpeg` installed remains the safest setup.
 
 ## Installation
 
-Install the default CLI in editable mode during development:
+Install the package in editable mode during development:
 
 ```bash
 python -m pip install -e .
 ```
 
-Or install it normally:
+Install it normally:
 
 ```bash
 python -m pip install .
@@ -45,33 +65,51 @@ Install test dependencies:
 python -m pip install .[test]
 ```
 
-Install the optional Transformers backend support:
+Install optional Transformers support:
 
 ```bash
 python -m pip install .[transformers]
 ```
 
-### AMD GPU Setup
+Important: the `transformers` extra installs `transformers`, but you still need a compatible PyTorch runtime for your environment.
 
-For AMD GPUs, use `--backend transformers`.
+## Backend Notes
+
+### Default backend: `faster-whisper`
+
+This is the default path and requires no backend flag:
+
+```bash
+openlecture lecture.mp3
+```
+
+Useful when you want the simplest setup and default CLI behavior.
+
+### Optional backend: `transformers`
+
+Use this when you explicitly want Hugging Face Whisper through PyTorch:
+
+```bash
+openlecture lecture.mp3 --backend transformers
+```
+
+The code resolves short model names like `medium` into Hugging Face model IDs such as `openai/whisper-medium`.
+
+### AMD GPU setups
+
+For AMD GPUs, use the `transformers` backend.
 
 Linux with ROCm:
 
-1. Install a ROCm-enabled PyTorch build from the official PyTorch instructions for your system.
-2. Install OpenLecture with the optional Transformers support:
-
-```bash
-python -m pip install .[transformers]
-```
+1. Install a ROCm-enabled PyTorch build for your system.
+2. Install OpenLecture with the `transformers` extra.
+3. Run OpenLecture with `--backend transformers --device rocm`.
 
 Windows with DirectML:
 
 1. Install `torch-directml`.
-2. Install OpenLecture with the optional Transformers support:
-
-```bash
-python -m pip install .[transformers]
-```
+2. Install OpenLecture with the `transformers` extra.
+3. Run OpenLecture with `--backend transformers --device dml`.
 
 Examples:
 
@@ -81,19 +119,11 @@ openlecture lecture.mp3 --backend transformers --device dml
 openlecture lecture.mp3 --backend transformers --device amd
 ```
 
-`--device amd` is a convenience alias that prefers ROCm when PyTorch exposes the GPU as `cuda`, and otherwise falls back to DirectML when available.
+`--device amd` is a convenience alias. It prefers ROCm when PyTorch exposes the GPU as `cuda`, otherwise it falls back to DirectML when available.
 
-## CLI Usage
+## Quick Start
 
-The supported CLI style is:
-
-```bash
-openlecture path/to/lecture.mp3
-```
-
-By default, OpenLecture writes a Markdown file next to the input audio using the same base name.
-
-Example:
+Transcribe a file and write a Markdown transcript next to it:
 
 ```bash
 openlecture lecture.mp3
@@ -105,34 +135,48 @@ This creates:
 lecture.md
 ```
 
-Choose a custom output file:
+Write to a custom output file:
 
 ```bash
 openlecture lecture.mp3 --output notes/lecture.md
 ```
 
-Disable progress output:
-
-```bash
-openlecture lecture.mp3 --no-progress
-```
-
-Disable timestamps in the generated Markdown:
+Remove timestamps from the Markdown output:
 
 ```bash
 openlecture lecture.mp3 --no-timestamps
 ```
 
-Select the backend explicitly:
+Use a specific model size:
 
 ```bash
-openlecture lecture.mp3 --backend transformers
+openlecture lecture.mp3 --model small
 ```
 
-Show full traceback on errors:
+Force the input language:
 
 ```bash
-openlecture lecture.mp3 --verbose
+openlecture lecture.mp3 --language it
+```
+
+Use the Transformers backend on AMD:
+
+```bash
+openlecture lecture.mp3 --backend transformers --device amd --compute-type auto
+```
+
+## CLI Usage
+
+The supported public CLI style is:
+
+```bash
+openlecture path/to/lecture.mp3
+```
+
+The command style below is not the intended public interface:
+
+```bash
+openlecture transcribe lecture.mp3
 ```
 
 ## CLI Options
@@ -151,36 +195,30 @@ openlecture lecture.mp3 --verbose
 --verbose, -v
 ```
 
-### Examples
+## More CLI Examples
 
-Use a smaller model with the default backend:
-
-```bash
-openlecture lecture.mp3 --model small
-```
-
-Tune decoding parameters for `faster-whisper`:
+Tune decoding for `faster-whisper`:
 
 ```bash
 openlecture lecture.mp3 --beam-size 3 --device cpu --compute-type int8
-```
-
-Use the Transformers backend on AMD:
-
-```bash
-openlecture lecture.mp3 --backend transformers --device amd --compute-type auto
-```
-
-Force the input language instead of auto-detection:
-
-```bash
-openlecture lecture.mp3 --language it
 ```
 
 Use larger chunks for long recordings:
 
 ```bash
 openlecture lecture.mp3 --chunk-length-ms 120000
+```
+
+Disable explicit chunk progress output:
+
+```bash
+openlecture lecture.mp3 --no-progress
+```
+
+Show the full traceback on failure:
+
+```bash
+openlecture lecture.mp3 --verbose
 ```
 
 ## Output Format
@@ -205,19 +243,138 @@ Today we talk about Fourier transform.
 The Fourier transform converts signals.
 ```
 
-## How It Works
+The formatter:
 
-- Files shorter than 5 minutes are transcribed directly without chunking.
-- Longer files are split into overlapping chunks.
-- Each chunk is exported to a temporary WAV file, transcribed, and deleted immediately.
-- Chunks use a small default overlap to reduce boundary errors.
-- Segments that fall fully inside already-processed overlap are discarded during merge.
-- The final output is rendered from structured `Segment` objects.
-- The `transformers` backend runs Whisper through `processor(...)` plus `model.generate(...)` and normalizes the returned segments back into the same `Segment` model.
+- always starts with `# Lecture Transcript`
+- skips empty transcript lines
+- uses `HH:MM:SS` timestamps
+- can render output with or without timestamps
+
+## How The Repository Works
+
+At a high level, the repository contains:
+
+- the CLI entrypoint
+- the internal transcription pipeline
+- audio chunking and decoding helpers
+- a Markdown formatter
+- tests
+- a benchmark script
+- CI configuration
+
+### Repository layout
+
+```text
+OpenLecture/
+├── .github/workflows/ci.yml
+├── openlecture/
+│   ├── __init__.py
+│   ├── audio_utils.py
+│   ├── cli.py
+│   ├── models.py
+│   ├── output_formatter.py
+│   └── transcribe.py
+├── scripts/
+│   └── benchmark.py
+├── tests/
+│   ├── conftest.py
+│   ├── test_audio_utils.py
+│   ├── test_backends.py
+│   ├── test_cli.py
+│   ├── test_output_formatter.py
+│   └── test_progress.py
+├── Ossessione.mp3
+├── Ossessione.md
+├── pyproject.toml
+├── requirements.txt
+└── README.md
+```
+
+### What each part does
+
+`openlecture/cli.py`
+
+- defines the Typer CLI
+- validates and prepares the output path
+- forwards CLI options into the transcription layer
+- writes the final Markdown file
+- shows clean errors unless `--verbose` is enabled
+
+`openlecture/transcribe.py`
+
+- implements the core transcription pipeline
+- loads and caches models
+- normalizes backend, device, compute type, and language options
+- decides whether to transcribe directly or chunk the audio
+- merges chunk results into absolute `Segment` objects
+- adapts the `transformers` backend to the same shape expected by the pipeline
+
+`openlecture/audio_utils.py`
+
+- validates audio paths
+- finds audio duration
+- loads audio through `pydub`, with `PyAV` fallback
+- splits long audio into overlapping chunks
+- exports chunk audio to temporary WAV files when needed
+
+`openlecture/output_formatter.py`
+
+- converts `list[Segment]` into Markdown
+
+`openlecture/models.py`
+
+- defines the core `Segment` dataclass used throughout the project
+
+`tests/`
+
+- covers the CLI, chunking behavior, backend wiring, progress reporting, and output formatting
+
+`scripts/benchmark.py`
+
+- measures transcription time relative to audio duration
+
+`Ossessione.mp3` and `Ossessione.md`
+
+- example input and example generated transcript currently stored in the repository root
+
+## Internal Flow
+
+The end-to-end flow is:
+
+1. The CLI receives an input audio file and optional runtime flags.
+2. The output path is resolved and parent directories are created if needed.
+3. The pipeline validates input and runtime options.
+4. A Whisper model is loaded and cached for the selected backend.
+5. Audio duration is measured.
+6. Files shorter than 5 minutes are transcribed directly.
+7. Longer files are split into overlapping chunks.
+8. Each chunk is exported to a temporary WAV file and transcribed.
+9. Chunk-local timestamps are converted into absolute timestamps.
+10. Segments fully contained inside already-processed overlap are discarded.
+11. The final list of `Segment` objects is rendered to Markdown.
+12. The transcript is written to disk.
+
+## Chunking Strategy
+
+Chunking exists to handle long audio more safely.
+
+Current defaults:
+
+- chunk length: `60000 ms`
+- overlap: `2000 ms`
+- small-file direct transcription threshold: `300 seconds`
+
+This means:
+
+- files shorter than 5 minutes skip chunking entirely
+- long files are split into 60-second chunks
+- adjacent chunks overlap by 2 seconds
+- the overlap helps reduce word cuts at chunk boundaries
+- duplicate overlap-only segments are removed during merge
 
 ## Python API
 
-The internal transcription pipeline is reusable from Python.
+The internal pipeline is reusable from Python.
 
 ```python
 from openlecture.transcribe import transcribe_audio
@@ -239,21 +396,77 @@ for segment in segments:
 `transcribe_audio()` returns a list of `Segment` objects:
 
 ```python
+from openlecture.models import Segment
+
 Segment(start=0.0, end=2.4, text="Hello and welcome")
 ```
 
+The core API currently revolves around this single data model.
+
 ## Development
 
-Run the test suite with:
+Install development dependencies:
+
+```bash
+python -m pip install -e .[test]
+```
+
+Run the test suite:
 
 ```bash
 pytest
 ```
 
-## Current Scope
+Run the benchmark script:
 
-OpenLecture currently focuses on:
+```bash
+python scripts/benchmark.py path/to/audio.mp3
+```
+
+Show progress during benchmarking:
+
+```bash
+python scripts/benchmark.py path/to/audio.mp3 --progress
+```
+
+## CI
+
+The repository includes a GitHub Actions workflow at `.github/workflows/ci.yml`.
+
+It currently:
+
+- runs on push and pull request
+- tests on Ubuntu and Windows
+- installs `-e .[test]`
+- runs `pytest`
+
+## Current Scope And Limits
+
+The project currently focuses on:
 
 - local transcription through the CLI
 - Markdown transcript generation
-- a clean internal pipeline for future outputs such as JSON, SRT, or VTT
+- a reusable internal pipeline
+
+The project does not currently implement:
+
+- JSON export
+- SRT export
+- VTT export
+- diarization
+- speaker labeling
+- batch folder processing
+- a web interface
+- an API server
+- transcript summarization
+
+## Design Intent
+
+The current architecture is deliberately simple:
+
+- `Segment` is the common data shape
+- transcription and formatting are separated
+- the CLI is thin and forwards into reusable Python functions
+- backend-specific behavior is isolated inside the transcription layer
+
+That structure makes it easier to add future output formats such as JSON, SRT, or VTT without rewriting the entire pipeline.
