@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from functools import lru_cache
 from math import ceil
 from pathlib import Path
@@ -300,7 +300,10 @@ class _TransformersModelAdapter:
 
     def transcribe(self, audio_path: str, **kwargs):
         """Transcribe audio and return segment-like objects with timestamps."""
-        import torch
+        try:
+            import torch
+        except ImportError:
+            torch = None
 
         audio_file = Path(audio_path)
         audio_samples = _load_transformers_audio(audio_file)
@@ -333,7 +336,8 @@ class _TransformersModelAdapter:
         if audio_duration_seconds > 30.0:
             generate_kwargs["return_dict_in_generate"] = True
 
-        with torch.no_grad():
+        no_grad_context = torch.no_grad() if torch is not None else nullcontext()
+        with no_grad_context:
             generated_output = self._model.generate(**generate_kwargs)
 
         return self._segments_from_generate_output(
