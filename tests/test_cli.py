@@ -12,6 +12,130 @@ from openlecture.models import Segment
 runner = CliRunner()
 
 
+class FakeProgressBar:
+    """Minimal tqdm-like object for CLI progress tests."""
+
+    def __init__(self, total: int = 0) -> None:
+        self.total = total
+        self.updated_by: list[int] = []
+        self.clear_calls = 0
+        self.refresh_calls = 0
+
+    def update(self, amount: int) -> None:
+        self.updated_by.append(amount)
+
+    def clear(self) -> None:
+        self.clear_calls += 1
+
+    def refresh(self) -> None:
+        self.refresh_calls += 1
+
+
+class FakeSmoothProgressBar:
+    """Minimal smooth progress bar double for CLI integration tests."""
+
+    def __init__(self, total: int, *, estimated_chunk_duration: float | None = None) -> None:
+        self.total = total
+        self.estimated_chunk_duration = estimated_chunk_duration
+        self.advance_calls: list[tuple[int, int]] = []
+        self.clear_calls = 0
+        self.refresh_calls = 0
+        self.closed = False
+
+    def advance_to(self, current: int, total: int) -> None:
+        self.advance_calls.append((current, total))
+
+    def clear(self) -> None:
+        self.clear_calls += 1
+
+    def refresh(self) -> None:
+        self.refresh_calls += 1
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_progress_callback_updates_tqdm_incrementally() -> None:
+    """The CLI progress callback should increment tqdm without resetting it."""
+    progress_bar = FakeProgressBar(total=8)
+    progress_callback = cli._build_progress_callback(progress_bar)
+
+    progress_callback(1, 8)
+    progress_callback(1, 8)
+    progress_callback(3, 8)
+
+    assert progress_bar.total == 8
+    assert progress_bar.updated_by == [1, 2]
+
+
+def test_status_callback_replaces_direct_transcribe_message(monkeypatch) -> None:
+    """Small-file CLI status should use a simple transcribing message."""
+    emitted_messages: list[str] = []
+
+    monkeypatch.setattr(cli.typer, "echo", lambda message: emitted_messages.append(message))
+    status_callback = cli._build_status_callback(replace_direct_transcribe_status=True)
+
+    status_callback("Loading Whisper model...")
+    status_callback("Transcribing audio directly (02:00 total audio)...")
+    status_callback("Transcribing audio directly (02:00 total audio)...")
+
+    assert emitted_messages == [
+        "Loading Whisper model...",
+        "Transcribing...",
+    ]
+
+
+def test_cli_uses_estimated_progress_bar_for_small_files(
+    workspace_tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Small files with known duration should use a smooth estimated progress bar."""
+    audio_file = workspace_tmp_path / "lecture.mp3"
+    audio_file.write_bytes(b"fake audio")
+    output_file = workspace_tmp_path / "custom.md"
+    created_bars: list[FakeSmoothProgressBar] = []
+
+    def fake_smooth_progress_bar(
+        total: int,
+        *,
+        estimated_chunk_duration: float | None = None,
+    ) -> FakeSmoothProgressBar:
+        progress_bar = FakeSmoothProgressBar(
+            total,
+            estimated_chunk_duration=estimated_chunk_duration,
+        )
+        created_bars.append(progress_bar)
+        return progress_bar
+
+    def fake_transcribe_audio(audio_path: str, **kwargs) -> list[Segment]:
+        assert audio_path == str(audio_file)
+        assert kwargs["show_progress"] is True
+        assert "progress_callback" in kwargs
+        kwargs["status_callback"]("Loading Whisper model...")
+        kwargs["status_callback"]("Transcribing audio directly (00:10 total audio)...")
+        kwargs["progress_callback"](1, 1)
+        return [Segment(start=0.0, end=1.0, text="Only sentence.")]
+
+    monkeypatch.setattr(cli, "_SmoothTqdmProgressBar", fake_smooth_progress_bar)
+    monkeypatch.setattr(cli, "get_audio_duration_seconds", lambda _audio_path: 10.0)
+    monkeypatch.setattr(cli, "transcribe_audio", fake_transcribe_audio)
+
+    result = runner.invoke(
+        cli.app,
+        [str(audio_file), "--output", str(output_file)],
+    )
+
+    assert result.exit_code == 0
+    assert len(created_bars) == 1
+    assert created_bars[0].total == 1
+    assert created_bars[0].estimated_chunk_duration == pytest.approx(12.0)
+    assert created_bars[0].advance_calls == [(1, 1)]
+    assert created_bars[0].clear_calls == 2
+    assert created_bars[0].refresh_calls == 2
+    assert created_bars[0].closed is True
+    assert output_file.read_text(encoding="utf-8") == "# Lecture Transcript\n\nOnly sentence."
+
+
 def test_help_works() -> None:
     """The CLI should expose help text successfully."""
     result = runner.invoke(cli.app, ["--help"])
@@ -56,7 +180,7 @@ def test_default_output_file_is_created(
     assert result.exit_code == 0
     assert output_file.exists()
     assert output_file.read_text(encoding="utf-8") == (
-        "# Lecture Transcript\n\n[00:00:01] First sentence.\n\n[00:00:03] Second sentence."
+        "# Lecture Transcript\n\nFirst sentence.\n\nSecond sentence."
     )
     assert f"Transcript saved to {output_file}" in result.output
 
@@ -129,17 +253,15 @@ def test_custom_output_file_is_created(
 
     assert result.exit_code == 0
     assert output_file.exists()
-    assert output_file.read_text(encoding="utf-8") == (
-        "# Lecture Transcript\n\n[00:00:00] Only sentence."
-    )
+    assert output_file.read_text(encoding="utf-8") == "# Lecture Transcript\n\nOnly sentence."
     assert not audio_file.with_suffix(".md").exists()
 
 
-def test_cli_can_disable_timestamps(
+def test_cli_can_enable_timestamps(
     workspace_tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """The CLI should allow Markdown output without timestamps."""
+    """The CLI should include Markdown timestamps only when explicitly requested."""
     audio_file = workspace_tmp_path / "lecture.mp3"
     audio_file.write_bytes(b"fake audio")
     output_file = workspace_tmp_path / "custom.md"
@@ -151,13 +273,13 @@ def test_cli_can_disable_timestamps(
 
     result = runner.invoke(
         cli.app,
-        [str(audio_file), "--output", str(output_file), "--no-timestamps"],
+        [str(audio_file), "--output", str(output_file), "--timestamps"],
     )
 
     assert result.exit_code == 0
     assert output_file.exists()
     assert output_file.read_text(encoding="utf-8") == (
-        "# Lecture Transcript\n\nOnly sentence."
+        "# Lecture Transcript\n\n[00:00:00] Only sentence."
     )
 
 
@@ -182,9 +304,7 @@ def test_output_parent_directories_are_created(
 
     assert result.exit_code == 0
     assert output_file.exists()
-    assert output_file.read_text(encoding="utf-8") == (
-        "# Lecture Transcript\n\n[00:00:00] Only sentence."
-    )
+    assert output_file.read_text(encoding="utf-8") == "# Lecture Transcript\n\nOnly sentence."
 
 
 def test_missing_input_argument_returns_error() -> None:
@@ -219,6 +339,18 @@ def test_cli_shows_clean_error_message_without_verbose(
 
     assert result.exit_code == 1
     assert "Error: Failed to load Whisper model" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_shows_explicit_error_for_markdown_input(workspace_tmp_path: Path) -> None:
+    """The CLI should clearly reject transcript files passed as input."""
+    transcript_file = workspace_tmp_path / "lecture.md"
+    transcript_file.write_text("# Lecture Transcript\n\nHello", encoding="utf-8")
+
+    result = runner.invoke(cli.app, [str(transcript_file)])
+
+    assert result.exit_code == 1
+    assert "Expected an audio file, but got a transcript or text file" in result.output
     assert "Traceback" not in result.output
 
 

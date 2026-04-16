@@ -20,6 +20,17 @@ SUPPORTED_FORMATS = {
     ".wav": "wav",
 }
 
+OBVIOUS_NON_AUDIO_EXTENSIONS = frozenset(
+    {
+        ".json",
+        ".md",
+        ".markdown",
+        ".srt",
+        ".txt",
+        ".vtt",
+    }
+)
+
 WINDOWS_WINGET_FFMPEG_PACKAGES = (
     "Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe",
     "Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe",
@@ -111,6 +122,17 @@ def _infer_audio_format(audio_file: Path) -> str | None:
     return SUPPORTED_FORMATS.get(audio_file.suffix.lower())
 
 
+def _reject_obviously_non_audio_file(audio_file: Path) -> None:
+    """Reject transcript-like files with a clear error before decoding."""
+    if audio_file.suffix.lower() not in OBVIOUS_NON_AUDIO_EXTENSIONS:
+        return
+
+    raise ValueError(
+        "Expected an audio file, but got a transcript or text file: "
+        f"{audio_file}. Use an input such as .mp3, .wav, .m4a, or .mp4."
+    )
+
+
 def _validate_audio_path(audio_path: str) -> Path:
     """Validate the input path and return it as a ``Path`` object."""
     if not audio_path or not audio_path.strip():
@@ -123,6 +145,8 @@ def _validate_audio_path(audio_path: str) -> Path:
 
     if not audio_file.is_file():
         raise ValueError(f"Audio path is not a file: {audio_file}")
+
+    _reject_obviously_non_audio_file(audio_file)
 
     return audio_file
 

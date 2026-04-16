@@ -8,4 +8,4 @@ __pycache__/
 *.tmp
 .DS_Store
 .env
-docs/
+docs/*

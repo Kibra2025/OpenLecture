@@ -62,6 +62,15 @@ def test_split_audio_rejects_directory_path(workspace_tmp_path: Path) -> None:
         split_audio(str(workspace_tmp_path))
 
 
+def test_split_audio_rejects_markdown_transcript_input(workspace_tmp_path: Path) -> None:
+    """split_audio should reject transcript-like files before decode starts."""
+    transcript_file = workspace_tmp_path / "lecture.md"
+    transcript_file.write_text("# Lecture Transcript\n\nHello", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Expected an audio file, but got a transcript or text file"):
+        split_audio(str(transcript_file))
+
+
 @pytest.mark.parametrize("chunk_length_ms", [0, -1])
 def test_split_audio_rejects_non_positive_chunk_length(
     workspace_tmp_path: Path,
@@ -184,6 +193,17 @@ def test_transcribe_audio_rejects_directory_path(workspace_tmp_path: Path) -> No
     """transcribe_audio should reject directory paths."""
     with pytest.raises(ValueError, match="Audio path is not a file"):
         transcribe_audio(str(workspace_tmp_path))
+
+
+def test_transcribe_audio_rejects_markdown_transcript_input(
+    workspace_tmp_path: Path,
+) -> None:
+    """transcribe_audio should reject transcript-like files before model loading."""
+    transcript_file = workspace_tmp_path / "lecture.md"
+    transcript_file.write_text("# Lecture Transcript\n\nHello", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Expected an audio file, but got a transcript or text file"):
+        transcribe_audio(str(transcript_file))
 
 
 @pytest.mark.parametrize("chunk_length_ms", [0, -1])

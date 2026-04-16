@@ -10,7 +10,12 @@ import tempfile
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Iterator
 
-from .audio_utils import DEFAULT_OVERLAP_MS, get_audio_duration_seconds, iter_audio_chunks
+from .audio_utils import (
+    DEFAULT_OVERLAP_MS,
+    _reject_obviously_non_audio_file,
+    get_audio_duration_seconds,
+    iter_audio_chunks,
+)
 from .models import Segment
 
 if TYPE_CHECKING:
@@ -393,6 +398,8 @@ def _validate_audio_file(audio_path: str) -> Path:
 
     if not audio_file.is_file():
         raise ValueError(f"Audio path is not a file: {audio_file}")
+
+    _reject_obviously_non_audio_file(audio_file)
 
     return audio_file
 
