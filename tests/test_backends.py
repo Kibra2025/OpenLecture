@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+import sys
 
 import pytest
 from typer.testing import CliRunner
@@ -238,3 +239,56 @@ def test_cli_forwards_transformers_backend_option(
         "device": "amd",
         "compute_type": "float16",
     }
+
+
+def test_get_transformers_model_uses_torch_dtype(monkeypatch) -> None:
+    """Transformers model loading should use ``torch_dtype`` for compatibility."""
+    transcribe._get_transformers_model.cache_clear()
+    captured_calls: dict[str, object] = {}
+
+    class FakeLoadedModel:
+        def to(self, device) -> None:
+            captured_calls["device_to"] = device
+
+        def eval(self) -> None:
+            captured_calls["eval_called"] = True
+
+    class FakeAutoModelForSpeechSeq2Seq:
+        @staticmethod
+        def from_pretrained(model_id: str, **kwargs):
+            captured_calls["model_id"] = model_id
+            captured_calls["kwargs"] = kwargs
+            return FakeLoadedModel()
+
+    class FakeAutoProcessor:
+        @staticmethod
+        def from_pretrained(model_id: str):
+            captured_calls["processor_model_id"] = model_id
+            return object()
+
+    fake_transformers = SimpleNamespace(
+        AutoModelForSpeechSeq2Seq=FakeAutoModelForSpeechSeq2Seq,
+        AutoProcessor=FakeAutoProcessor,
+    )
+
+    monkeypatch.setattr(transcribe, "_resolve_transformers_model_id", lambda model_size: "fake-model")
+    monkeypatch.setattr(transcribe, "_resolve_transformers_device", lambda device: "fake-device")
+    monkeypatch.setattr(transcribe, "_resolve_transformers_dtype", lambda compute_type, device: "fake-dtype")
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    adapter = transcribe._get_transformers_model(
+        model_size="small",
+        device="dml",
+        compute_type="auto",
+    )
+
+    assert isinstance(adapter, _TransformersModelAdapter)
+    assert captured_calls == {
+        "model_id": "fake-model",
+        "kwargs": {"torch_dtype": "fake-dtype"},
+        "device_to": "fake-device",
+        "eval_called": True,
+        "processor_model_id": "fake-model",
+    }
+
+    transcribe._get_transformers_model.cache_clear()

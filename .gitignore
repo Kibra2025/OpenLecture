@@ -1,4 +1,5 @@
 venv/
+.venv*/
 __pycache__/
 *.egg-info/
 *.pyc
@@ -9,3 +10,7 @@ __pycache__/
 .DS_Store
 .env
 docs/*
+tests/_tmp/
+debug_*.py
+debug_output.txt
+*_test.md

@@ -8,7 +8,7 @@ from math import ceil
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Callable, Iterator
+from typing import TYPE_CHECKING, Callable, Iterator, Union
 
 from .audio_utils import (
     DEFAULT_OVERLAP_MS,
@@ -320,21 +320,20 @@ class _TransformersModelAdapter:
             audio_samples,
             sampling_rate=WHISPER_SAMPLE_RATE,
             return_tensors="pt",
-            truncation=False,
             padding="longest",
+            truncation=False,
             return_attention_mask=True,
         )
-        input_features = processor_inputs["input_features"].to(self._device)
-        attention_mask = processor_inputs.get("attention_mask")
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(self._device)
+        
+        inputs = {k: v.to(self._device) for k, v in processor_inputs.items()}
 
         generate_kwargs = {
-            "input_features": input_features,
-            "attention_mask": attention_mask,
+            **inputs,
             "task": "transcribe",
             "return_timestamps": True,
             "num_beams": beam_size,
+            "do_sample": False,
+            "max_new_tokens": 255,
         }
         if language is not None:
             generate_kwargs["language"] = language
@@ -345,10 +344,46 @@ class _TransformersModelAdapter:
         with no_grad_context:
             generated_output = self._model.generate(**generate_kwargs)
 
-        return self._segments_from_generate_output(
+        segments, output = self._segments_from_generate_output(
             generated_output,
             audio_duration_seconds=audio_duration_seconds,
         )
+
+        if segments:
+            text = " ".join(s.text for s in segments).strip()
+            if not text or (len(text) > 0 and all(c in "!. " for c in text)):
+                import warnings
+                warnings.warn(
+                    f"Detected garbage output on device {self._device}. Falling back to CPU.",
+                    RuntimeWarning,
+                )
+                cpu_device = torch.device("cpu")
+                self._model.to(cpu_device)
+                
+                cpu_inputs = {k: v.to(cpu_device) for k, v in processor_inputs.items()}
+                cpu_generate_kwargs = {
+                    **cpu_inputs,
+                    "task": "transcribe",
+                    "return_timestamps": True,
+                    "num_beams": beam_size,
+                    "do_sample": False,
+                    "max_new_tokens": 255,
+                }
+                if language is not None:
+                    cpu_generate_kwargs["language"] = language
+                if audio_duration_seconds > 30.0:
+                    cpu_generate_kwargs["return_dict_in_generate"] = True
+
+                with no_grad_context:
+                    generated_output_cpu = self._model.generate(**cpu_generate_kwargs)
+                
+                segments, _ = self._segments_from_generate_output(
+                    generated_output_cpu,
+                    audio_duration_seconds=audio_duration_seconds,
+                )
+                self._model.to(self._device)
+
+        return segments, output
 
 
 def _validate_transcription_options(
@@ -435,7 +470,7 @@ def _get_transformers_model(
 
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
         resolved_model_id,
-        dtype=resolved_dtype,
+        torch_dtype=resolved_dtype,
     )
     model.to(resolved_device)
     model.eval()
@@ -499,8 +534,35 @@ def _load_model(
     )
 
 
+def _build_model_load_error(
+    *,
+    backend: str,
+    device: str,
+    model_size: str,
+    exc: Exception,
+) -> RuntimeError:
+    """Build a more actionable model-load error for the selected backend."""
+    message = (
+        f"Failed to load Whisper model '{model_size}' using backend '{backend}' "
+        f"on device '{device}': {exc}"
+    )
+
+    if backend != "transformers":
+        return RuntimeError(message)
+
+    hint = (
+        " Verify that Transformers support is installed with `.[transformers]` "
+        "and that your PyTorch runtime matches the selected device."
+    )
+    normalized_device = device.strip().lower()
+    if normalized_device in {"amd", "dml", "directml"}:
+        hint += " For DirectML, install `torch-directml` in the same environment."
+
+    return RuntimeError(message + hint)
+
+
 def _transcribe_file(
-    model: "WhisperModel",
+    model: Union["WhisperModel", _TransformersModelAdapter],
     audio_file: Path,
     *,
     show_progress: bool,
@@ -569,7 +631,7 @@ def _discard_processed_overlap_segments(
 
 
 def _transcribe_chunk(
-    model: "WhisperModel",
+    model: Union["WhisperModel", _TransformersModelAdapter],
     chunk: "AudioSegment",
     *,
     show_progress: bool,
@@ -636,7 +698,12 @@ def transcribe_audio(
             compute_type=normalized_compute_type,
         )
     except Exception as exc:
-        raise RuntimeError("Failed to load Whisper model") from exc
+        raise _build_model_load_error(
+            model_size=normalized_model_size,
+            backend=normalized_backend,
+            device=normalized_device,
+            exc=exc,
+        ) from exc
 
     try:
         total_audio_seconds = get_audio_duration_seconds(str(audio_file))

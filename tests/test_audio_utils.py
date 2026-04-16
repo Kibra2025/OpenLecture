@@ -234,6 +234,33 @@ def test_transcribe_audio_raises_specific_model_load_error(
         transcribe_audio(str(audio_file))
 
 
+def test_transcribe_audio_preserves_model_load_context(
+    workspace_tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Model load failures should include the backend, device, and root cause."""
+    audio_file = workspace_tmp_path / "lecture.mp3"
+    audio_file.write_bytes(b"fake audio")
+
+    def fail_model_load(*args, **kwargs):
+        raise ImportError("torch-directml missing")
+
+    monkeypatch.setattr(transcribe, "_get_model", fail_model_load)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "backend 'transformers'.*device 'dml'.*torch-directml missing.*"
+            "torch-directml"
+        ),
+    ):
+        transcribe_audio(
+            str(audio_file),
+            backend="transformers",
+            device="dml",
+        )
+
+
 def test_transcribe_file_returns_structured_segments_with_absolute_offsets() -> None:
     """_transcribe_file should preserve timestamps, trim text, and pass options."""
     captured_kwargs: dict[str, object] = {}
