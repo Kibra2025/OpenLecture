@@ -260,7 +260,7 @@ At a high level, the repository contains:
 - tests
 - a benchmark script
 - CI configuration
-- an AI-oriented context document in `docs/CONTESTO_PROGETTO_AI.md`
+
 
 ### Repository Layout
 
