@@ -135,6 +135,32 @@ def test_custom_output_file_is_created(
     assert not audio_file.with_suffix(".md").exists()
 
 
+def test_cli_can_disable_timestamps(
+    workspace_tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The CLI should allow Markdown output without timestamps."""
+    audio_file = workspace_tmp_path / "lecture.mp3"
+    audio_file.write_bytes(b"fake audio")
+    output_file = workspace_tmp_path / "custom.md"
+
+    def fake_transcribe_audio(*args, **kwargs) -> list[Segment]:
+        return [Segment(start=0.0, end=1.0, text="Only sentence.")]
+
+    monkeypatch.setattr(cli, "transcribe_audio", fake_transcribe_audio)
+
+    result = runner.invoke(
+        cli.app,
+        [str(audio_file), "--output", str(output_file), "--no-timestamps"],
+    )
+
+    assert result.exit_code == 0
+    assert output_file.exists()
+    assert output_file.read_text(encoding="utf-8") == (
+        "# Lecture Transcript\n\nOnly sentence."
+    )
+
+
 def test_output_parent_directories_are_created(
     workspace_tmp_path: Path,
     monkeypatch,

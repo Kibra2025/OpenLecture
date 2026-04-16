@@ -1,6 +1,8 @@
 ﻿# OpenLecture
 
-OpenLecture is an open-source CLI for transcribing lectures and long-form audio with `faster-whisper`.
+OpenLecture is an open-source CLI for transcribing lectures and long-form audio.
+
+By default it uses `faster-whisper`, and it also ships with an optional `transformers` backend for environments where PyTorch is a better fit, including AMD GPU setups.
 
 It is designed to be simple to run from the terminal, while keeping the transcription pipeline reusable as a Python module.
 
@@ -8,7 +10,9 @@ It is designed to be simple to run from the terminal, while keeping the transcri
 
 - Transcribes audio files into Markdown
 - Produces timestamped transcript lines
-- Uses `faster-whisper` under the hood
+- Can optionally omit timestamps in Markdown output
+- Supports both `faster-whisper` and `transformers` backends
+- Can use AMD GPUs through the `transformers` backend with ROCm or DirectML
 - Skips chunking for short files
 - Splits long files into overlapping chunks to reduce word cuts at boundaries
 - Exposes model and decoding controls from the CLI
@@ -23,7 +27,7 @@ OpenLecture uses `pydub` for chunking and `PyAV` as a decoding fallback. In prac
 
 ## Installation
 
-Install the project in editable mode during development:
+Install the default CLI in editable mode during development:
 
 ```bash
 python -m pip install -e .
@@ -40,6 +44,44 @@ Install test dependencies:
 ```bash
 python -m pip install .[test]
 ```
+
+Install the optional Transformers backend support:
+
+```bash
+python -m pip install .[transformers]
+```
+
+### AMD GPU Setup
+
+For AMD GPUs, use `--backend transformers`.
+
+Linux with ROCm:
+
+1. Install a ROCm-enabled PyTorch build from the official PyTorch instructions for your system.
+2. Install OpenLecture with the optional Transformers support:
+
+```bash
+python -m pip install .[transformers]
+```
+
+Windows with DirectML:
+
+1. Install `torch-directml`.
+2. Install OpenLecture with the optional Transformers support:
+
+```bash
+python -m pip install .[transformers]
+```
+
+Examples:
+
+```bash
+openlecture lecture.mp3 --backend transformers --device rocm
+openlecture lecture.mp3 --backend transformers --device dml
+openlecture lecture.mp3 --backend transformers --device amd
+```
+
+`--device amd` is a convenience alias that prefers ROCm when PyTorch exposes the GPU as `cuda`, and otherwise falls back to DirectML when available.
 
 ## CLI Usage
 
@@ -75,6 +117,18 @@ Disable progress output:
 openlecture lecture.mp3 --no-progress
 ```
 
+Disable timestamps in the generated Markdown:
+
+```bash
+openlecture lecture.mp3 --no-timestamps
+```
+
+Select the backend explicitly:
+
+```bash
+openlecture lecture.mp3 --backend transformers
+```
+
 Show full traceback on errors:
 
 ```bash
@@ -86,7 +140,9 @@ openlecture lecture.mp3 --verbose
 ```text
 --output PATH
 --progress / --no-progress
+--timestamps / --no-timestamps
 --chunk-length-ms INTEGER
+--backend TEXT
 --model TEXT
 --beam-size INTEGER
 --device TEXT
@@ -97,16 +153,22 @@ openlecture lecture.mp3 --verbose
 
 ### Examples
 
-Use a smaller model:
+Use a smaller model with the default backend:
 
 ```bash
 openlecture lecture.mp3 --model small
 ```
 
-Tune decoding parameters:
+Tune decoding parameters for `faster-whisper`:
 
 ```bash
 openlecture lecture.mp3 --beam-size 3 --device cpu --compute-type int8
+```
+
+Use the Transformers backend on AMD:
+
+```bash
+openlecture lecture.mp3 --backend transformers --device amd --compute-type auto
 ```
 
 Force the input language instead of auto-detection:
@@ -133,6 +195,16 @@ OpenLecture writes Markdown like this:
 [00:00:04] The Fourier transform converts signals.
 ```
 
+Or without timestamps:
+
+```md
+# Lecture Transcript
+
+Today we talk about Fourier transform.
+
+The Fourier transform converts signals.
+```
+
 ## How It Works
 
 - Files shorter than 5 minutes are transcribed directly without chunking.
@@ -141,6 +213,7 @@ OpenLecture writes Markdown like this:
 - Chunks use a small default overlap to reduce boundary errors.
 - Segments that fall fully inside already-processed overlap are discarded during merge.
 - The final output is rendered from structured `Segment` objects.
+- The `transformers` backend runs Whisper through `processor(...)` plus `model.generate(...)` and normalizes the returned segments back into the same `Segment` model.
 
 ## Python API
 
@@ -151,9 +224,10 @@ from openlecture.transcribe import transcribe_audio
 
 segments = transcribe_audio(
     "lecture.mp3",
+    backend="transformers",
     model_size="medium",
     beam_size=5,
-    device="auto",
+    device="amd",
     compute_type="auto",
     language=None,
 )

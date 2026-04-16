@@ -26,6 +26,20 @@ def test_transcript_to_markdown_formats_segments_with_timestamps() -> None:
     )
 
 
+def test_transcript_to_markdown_can_skip_timestamps() -> None:
+    """The formatter should support Markdown output without timestamps."""
+    transcript = [
+        Segment(start=1.2, end=3.9, text="Today we talk about Fourier transform."),
+        Segment(start=4.0, end=6.1, text="The Fourier transform converts signals."),
+    ]
+
+    assert transcript_to_markdown(transcript, include_timestamps=False) == (
+        "# Lecture Transcript\n\n"
+        "Today we talk about Fourier transform.\n\n"
+        "The Fourier transform converts signals."
+    )
+
+
 @pytest.mark.parametrize(
     "value",
     [None, 123, "not a segment list", [Segment(0.0, 1.0, "ok"), "bad"]],

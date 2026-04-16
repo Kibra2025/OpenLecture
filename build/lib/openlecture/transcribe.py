@@ -29,7 +29,8 @@ DEFAULT_COMPUTE_TYPE = "auto"
 DEFAULT_CHUNK_LENGTH_MS = 60_000
 SMALL_FILE_CHUNKING_THRESHOLD_SECONDS = 300
 SUPPORTED_BACKENDS = ("faster-whisper", "transformers")
-WHISPER_SAMPLE_RATE = 16_000
+TRANSFORMERS_INTERNAL_CHUNK_LENGTH_SECONDS = 30
+TRANSFORMERS_INTERNAL_STRIDE_LENGTH_SECONDS = 5
 
 
 def _format_clock(seconds: float | None, *, round_up: bool = False) -> str:
@@ -203,143 +204,75 @@ def _resolve_transformers_dtype(compute_type: str, device) -> object:
     return supported_dtypes[normalized_compute_type]
 
 
-def _load_transformers_audio(audio_file: Path):
-    """Load audio as a mono 16 kHz float32 array for Whisper."""
-    import numpy as np
+class _TransformersPipelineAdapter:
+    """Adapt a Transformers ASR pipeline to the faster-whisper interface."""
 
-    from .audio_utils import _load_audio_segment
-
-    audio_segment = _load_audio_segment(audio_file)
-    normalized_audio = audio_segment.set_frame_rate(WHISPER_SAMPLE_RATE).set_channels(1)
-    samples = np.asarray(normalized_audio.get_array_of_samples(), dtype=np.float32)
-
-    if normalized_audio.sample_width == 1:
-        samples = (samples - 128.0) / 128.0
-    else:
-        samples /= float(1 << ((8 * normalized_audio.sample_width) - 1))
-
-    return samples
-
-
-class _TransformersModelAdapter:
-    """Adapt a Transformers Whisper model to the faster-whisper interface."""
-
-    def __init__(self, model, processor, device) -> None:
-        self._model = model
-        self._processor = processor
-        self._device = device
-
-    def _decode_tokens(self, tokens) -> str:
-        """Decode Whisper token IDs into plain transcript text."""
-        if hasattr(tokens, "tolist"):
-            tokens = tokens.tolist()
-
-        decoded = self._processor.batch_decode([tokens], skip_special_tokens=True)
-        if not decoded:
-            return ""
-        return str(decoded[0]).strip()
-
-    def _segments_from_generate_output(
-        self,
-        generated_output,
-        *,
-        audio_duration_seconds: float,
-    ):
-        """Convert Whisper generate() output into segment-like objects."""
-        segments = None
-        if hasattr(generated_output, "get"):
-            segments = generated_output.get("segments")
-
-        if segments:
-            transcript_segments: list[SimpleNamespace] = []
-            for segment in segments[0]:
-                text = self._decode_tokens(segment.get("tokens", []))
-                if not text:
-                    continue
-
-                raw_start = segment.get("start", 0.0)
-                raw_end = segment.get("end", raw_start)
-                if hasattr(raw_start, "item"):
-                    raw_start = raw_start.item()
-                if hasattr(raw_end, "item"):
-                    raw_end = raw_end.item()
-
-                start = float(raw_start)
-                end = float(raw_end)
-                transcript_segments.append(
-                    SimpleNamespace(
-                        start=start,
-                        end=max(start, end),
-                        text=text,
-                    )
-                )
-
-            if transcript_segments:
-                return transcript_segments, generated_output
-
-        sequences = generated_output
-        if hasattr(generated_output, "get") and generated_output.get("sequences") is not None:
-            sequences = generated_output["sequences"]
-
-        text = ""
-        if sequences is not None:
-            decoded = self._processor.batch_decode(sequences, skip_special_tokens=True)
-            if decoded:
-                text = str(decoded[0]).strip()
-
-        if not text:
-            return [], generated_output
-
-        return [
-            SimpleNamespace(
-                start=0.0,
-                end=max(0.0, audio_duration_seconds),
-                text=text,
-            )
-        ], generated_output
+    def __init__(self, asr_pipeline) -> None:
+        self._asr_pipeline = asr_pipeline
 
     def transcribe(self, audio_path: str, **kwargs):
         """Transcribe audio and return segment-like objects with timestamps."""
-        import torch
-
-        audio_file = Path(audio_path)
-        audio_samples = _load_transformers_audio(audio_file)
-        audio_duration_seconds = len(audio_samples) / WHISPER_SAMPLE_RATE
         beam_size = int(kwargs.get("beam_size", DEFAULT_BEAM_SIZE))
         language = kwargs.get("language")
-
-        processor_inputs = self._processor(
-            audio_samples,
-            sampling_rate=WHISPER_SAMPLE_RATE,
-            return_tensors="pt",
-            truncation=False,
-            padding="longest",
-            return_attention_mask=True,
-        )
-        input_features = processor_inputs["input_features"].to(self._device)
-        attention_mask = processor_inputs.get("attention_mask")
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(self._device)
-
         generate_kwargs = {
-            "input_features": input_features,
-            "attention_mask": attention_mask,
-            "task": "transcribe",
-            "return_timestamps": True,
             "num_beams": beam_size,
+            "task": "transcribe",
         }
+
         if language is not None:
             generate_kwargs["language"] = language
-        if audio_duration_seconds > 30.0:
-            generate_kwargs["return_dict_in_generate"] = True
 
-        with torch.no_grad():
-            generated_output = self._model.generate(**generate_kwargs)
-
-        return self._segments_from_generate_output(
-            generated_output,
-            audio_duration_seconds=audio_duration_seconds,
+        result = self._asr_pipeline(
+            audio_path,
+            return_timestamps=True,
+            chunk_length_s=TRANSFORMERS_INTERNAL_CHUNK_LENGTH_SECONDS,
+            stride_length_s=TRANSFORMERS_INTERNAL_STRIDE_LENGTH_SECONDS,
+            generate_kwargs=generate_kwargs,
         )
+
+        chunks = result.get("chunks") if isinstance(result, dict) else None
+        if not chunks:
+            text = ""
+            if isinstance(result, dict):
+                text = str(result.get("text", "")).strip()
+
+            if not text:
+                return [], None
+
+            return [SimpleNamespace(start=0.0, end=0.0, text=text)], None
+
+        transcript_segments: list[SimpleNamespace] = []
+        last_end = 0.0
+
+        for chunk in chunks:
+            text = str(chunk.get("text", "")).strip()
+            if not text:
+                continue
+
+            start = last_end
+            end = last_end
+            timestamp = chunk.get("timestamp")
+
+            if isinstance(timestamp, (tuple, list)) and len(timestamp) == 2:
+                raw_start, raw_end = timestamp
+                if raw_start is not None:
+                    start = float(raw_start)
+                if raw_end is not None:
+                    end = float(raw_end)
+                else:
+                    end = start
+
+            end = max(start, end)
+            last_end = end
+            transcript_segments.append(
+                SimpleNamespace(
+                    start=start,
+                    end=end,
+                    text=text,
+                )
+            )
+
+        return transcript_segments, None
 
 
 def _validate_transcription_options(
@@ -414,9 +347,9 @@ def _get_transformers_model(
     model_size: str = DEFAULT_MODEL_SIZE,
     device: str = DEFAULT_DEVICE,
     compute_type: str = DEFAULT_COMPUTE_TYPE,
-) -> _TransformersModelAdapter:
-    """Load and cache a Transformers Whisper model for the given runtime configuration."""
-    from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+) -> _TransformersPipelineAdapter:
+    """Load and cache a Transformers Whisper pipeline for the given runtime configuration."""
+    from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
     resolved_model_id = _resolve_transformers_model_id(model_size)
     resolved_device = _resolve_transformers_device(device)
@@ -424,13 +357,20 @@ def _get_transformers_model(
 
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
         resolved_model_id,
-        dtype=resolved_dtype,
+        torch_dtype=resolved_dtype,
     )
     model.to(resolved_device)
-    model.eval()
 
     processor = AutoProcessor.from_pretrained(resolved_model_id)
-    return _TransformersModelAdapter(model, processor, resolved_device)
+    asr_pipeline = pipeline(
+        "automatic-speech-recognition",
+        model=model,
+        tokenizer=processor.tokenizer,
+        feature_extractor=processor.feature_extractor,
+        torch_dtype=resolved_dtype,
+        device=resolved_device,
+    )
+    return _TransformersPipelineAdapter(asr_pipeline)
 
 
 def _get_model(
